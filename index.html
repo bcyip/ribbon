@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>USCCS Match Ribbon</title>
+<style>
+  :root { --navy: #11213F; --gold: #E7C247; --bg: #F4F6FA; --border: #E1E5EC; --gray: #5A6472; --success: #1E7A46; --danger: #C0392B; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, sans-serif; background: var(--bg); margin: 0; color: #1a1a1a; }
+  header { background: var(--navy); color: var(--gold); padding: 14px 20px; font-weight: 700; font-size: 17px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  header .week-range { color: #fff; font-weight: 400; font-size: 13px; }
+  main { max-width: 1400px; margin: 0 auto; padding: 20px; }
+  .muted { color: var(--gray); font-size: 13px; }
+
+  .ribbon-section { background: #fff; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; overflow: hidden; }
+  .ribbon-label { display: flex; align-items: center; gap: 8px; padding: 10px 16px; font-weight: 700; color: var(--navy); font-size: 13.5px; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .ribbon-label .count { font-weight: 400; color: var(--gray); text-transform: none; font-size: 12px; letter-spacing: normal; }
+
+  .ribbon-row { display: flex; align-items: stretch; min-height: 118px; }
+  .ribbon-half { flex: 1 1 50%; min-width: 0; display: flex; align-items: center; gap: 8px; overflow-x: auto; padding: 12px; scrollbar-width: thin; }
+  .ribbon-half.completed { justify-content: flex-end; }
+  .ribbon-half.upcoming { justify-content: flex-start; }
+  .ribbon-half.upcoming.full-width { flex: 1 1 100%; }
+  .ribbon-divider { flex: 0 0 auto; width: 2px; background: var(--border); position: relative; align-self: stretch; }
+  .ribbon-divider .today-tag { position: absolute; top: -9px; left: 50%; transform: translateX(-50%); background: var(--navy); color: var(--gold); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+
+  .game-card { flex: 0 0 auto; width: 138px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px; font-size: 11.5px; }
+  .game-card.is-completed { background: #fff; }
+  .game-card .div-name { font-size: 9.5px; text-transform: uppercase; color: var(--gray); font-weight: 700; letter-spacing: .02em; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .game-card .team-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 2px; }
+  .game-card .team-name { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: #1a1a1a; }
+  .game-card .team-score { flex: 0 0 auto; font-weight: 700; color: var(--navy); font-variant-numeric: tabular-nums; }
+  .game-card .vs { color: var(--gray); font-weight: 400; }
+  .game-card .team-row.winner .team-name, .game-card .team-row.winner .team-score { color: var(--success); }
+  .game-card .game-time { margin-top: 5px; color: var(--gray); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .empty-row { padding: 30px; text-align: center; width: 100%; }
+  #loadingMsg, #errorMsg { padding: 40px; text-align: center; }
+  #errorMsg { color: var(--danger); display: none; }
+  .reload-btn { margin-top: 10px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--navy); font-size: 13px; cursor: pointer; }
+  .reload-btn:hover { background: var(--bg); }
+</style>
+</head>
+<body>
+<header>
+  <span>USCCS Match Ribbon</span>
+  <span class="week-range" id="weekRangeLabel"></span>
+</header>
+
+<main>
+  <div id="loadingMsg" class="muted">Loading this week's games…</div>
+  <div id="errorMsg"></div>
+
+  <div id="ribbonContent" style="display:none;">
+    <div class="ribbon-section">
+      <div class="ribbon-label">Men's <span class="count" id="menCount"></span></div>
+      <div class="ribbon-row" id="menRow"></div>
+    </div>
+    <div class="ribbon-section">
+      <div class="ribbon-label">Women's <span class="count" id="womenCount"></span></div>
+      <div class="ribbon-row" id="womenRow"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+  function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function formatWeekRange(startIso, endIso) {
+    const start = new Date(startIso);
+    const end = new Date(endIso);
+    const fmt = (d) => d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' });
+    return fmt(start) + ' – ' + fmt(end);
+  }
+
+  function formatGameTime(iso) {
+    if (!iso) return '';
+    return new Date(iso).toLocaleString('en-US', {
+      timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    }) + ' ET';
+  }
+
+  // One small card: division name, home/away team names with the score
+  // (completed) or "vs" (upcoming) between them, and the game's date/time.
+  // The winning team's row is highlighted green for a completed game with
+  // a clear winner (left as neutral for a tie).
+  function gameCardHtml(g) {
+    const home = escapeHtml(g.homeTeam || 'TBD');
+    const away = escapeHtml(g.awayTeam || 'TBD');
+    const homeWins = g.isCompleted && g.homeScore != null && g.awayScore != null && g.homeScore > g.awayScore;
+    const awayWins = g.isCompleted && g.homeScore != null && g.awayScore != null && g.awayScore > g.homeScore;
+    const scoreOrVs = g.isCompleted && g.homeScore != null && g.awayScore != null
+      ? { home: g.homeScore, away: g.awayScore }
+      : null;
+
+    return `
+      <div class="game-card ${g.isCompleted ? 'is-completed' : ''}" title="${home} vs ${away}">
+        <div class="div-name">${escapeHtml(g.divisionName || '')}</div>
+        <div class="team-row ${homeWins ? 'winner' : ''}">
+          <span class="team-name">${home}</span>
+          <span class="team-score">${scoreOrVs ? scoreOrVs.home : ''}</span>
+        </div>
+        <div class="team-row ${awayWins ? 'winner' : ''}">
+          <span class="team-name">${away}</span>
+          <span class="team-score">${scoreOrVs ? scoreOrVs.away : '<span class=\'vs\'>vs</span>'}</span>
+        </div>
+        <div class="game-time">${formatGameTime(g.startTime)}</div>
+      </div>
+    `;
+  }
+
+  // Renders one gender's row: completed games right-aligned in the left
+  // half (nearest the "Today" divider is the most recently completed
+  // game), upcoming games left-aligned in the right half (nearest the
+  // divider is the soonest upcoming game). If there are no completed
+  // games at all, the row has no divider and upcoming games fill it
+  // entirely, per spec.
+  function renderRow(container, games) {
+    const completed = games.filter((g) => g.isCompleted);
+    const upcoming = games.filter((g) => !g.isCompleted);
+
+    if (!games.length) {
+      container.innerHTML = '<div class="empty-row muted">No games scheduled this week.</div>';
+      return;
+    }
+
+    if (!completed.length) {
+      container.innerHTML = `<div class="ribbon-half upcoming full-width">${upcoming.map(gameCardHtml).join('')}</div>`;
+      return;
+    }
+
+    container.innerHTML = `
+      <div class="ribbon-half completed">${completed.map(gameCardHtml).join('')}</div>
+      <div class="ribbon-divider"><span class="today-tag">Today</span></div>
+      <div class="ribbon-half upcoming">${upcoming.length ? upcoming.map(gameCardHtml).join('') : '<span class="muted" style="padding:0 8px;">No upcoming games</span>'}</div>
+    `;
+
+    // Start each scrollable half nearest the divider (completed: scrolled
+    // to its right edge; upcoming: at its left edge, which is the default).
+    const completedEl = container.querySelector('.ribbon-half.completed');
+    if (completedEl) completedEl.scrollLeft = completedEl.scrollWidth;
+  }
+
+  async function loadRibbon() {
+    document.getElementById('loadingMsg').style.display = 'block';
+    document.getElementById('errorMsg').style.display = 'none';
+    document.getElementById('ribbonContent').style.display = 'none';
+
+    try {
+      const res = await fetch('/api/ribbon');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load games');
+
+      document.getElementById('weekRangeLabel').textContent = formatWeekRange(data.weekStart, data.weekEnd);
+      document.getElementById('menCount').textContent = '(' + data.men.length + ')';
+      document.getElementById('womenCount').textContent = '(' + data.women.length + ')';
+      renderRow(document.getElementById('menRow'), data.men);
+      renderRow(document.getElementById('womenRow'), data.women);
+
+      document.getElementById('loadingMsg').style.display = 'none';
+      document.getElementById('ribbonContent').style.display = 'block';
+    } catch (e) {
+      document.getElementById('loadingMsg').style.display = 'none';
+      const errEl = document.getElementById('errorMsg');
+      errEl.style.display = 'block';
+      errEl.innerHTML = 'Failed to load this week\'s games: ' + escapeHtml(e.message) + '<br /><button class="reload-btn" onclick="loadRibbon()">Try again</button>';
+    }
+  }
+
+  loadRibbon();
+</script>
+</body>
+</html>
