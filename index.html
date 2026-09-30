@@ -23,9 +23,18 @@
   .divider-swatch.men { background: var(--navy); }
   .divider-swatch.women { background: var(--gold); }
 
-  .ribbon-row { display: flex; align-items: center; gap: 10px; overflow-x: hidden; padding: 10px; }
-  .ribbon-row.men { box-shadow: inset 4px 0 0 var(--navy); }
-  .ribbon-row.women { box-shadow: inset 4px 0 0 var(--gold); }
+  /* The row itself is just an overflow-hidden window; its background IS
+     the gender color (not just an edge stripe), so any gap around/between
+     cards - including the space cards scroll through - shows that color
+     rather than the card fill or the outer white block. The actual
+     scrolling happens on .ribbon-track (a transform: translateX, animated
+     on the compositor thread - much smoother than animating scrollLeft,
+     which forces a synchronous layout/paint every frame and was the
+     source of the jerkiness). */
+  .ribbon-row { overflow: hidden; }
+  .ribbon-row.men { background: var(--navy); }
+  .ribbon-row.women { background: var(--gold); }
+  .ribbon-track { display: flex; align-items: center; gap: 10px; padding: 10px; width: max-content; will-change: transform; }
 
   .game-card { flex: 0 0 auto; width: 190px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px; font-size: 15px; }
   .game-card .team-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -50,12 +59,12 @@
 
   <div id="ribbonContent" style="display:none;">
     <div class="ribbon-block">
-      <div class="ribbon-row men" id="menRow"></div>
+      <div class="ribbon-row men"><div class="ribbon-track" id="menRow"></div></div>
       <div class="ribbon-divider">
         <span class="divider-tag"><span class="divider-swatch men"></span>Men's</span>
         <span class="divider-tag"><span class="divider-swatch women"></span>Women's</span>
       </div>
-      <div class="ribbon-row women" id="womenRow"></div>
+      <div class="ribbon-row women"><div class="ribbon-track" id="womenRow"></div></div>
     </div>
   </div>
 </main>
@@ -116,68 +125,71 @@
   }
 
   // Continuously auto-scrolls a row left-to-right (most recent -> oldest)
-  // at a slow, steady pace, looping seamlessly forever. The trick: the
-  // row's cards are rendered TWICE back-to-back (see renderRow), so once
-  // scrollLeft passes the width of one full copy, we snap it back by that
-  // same width - since the second copy is identical to the first, the jump
-  // is invisible and the ticker appears to loop endlessly. Pauses on
-  // hover/touch so someone can actually read a card.
-  const SCROLL_PX_PER_SEC = 28;
+  // by animating a CSS transform (translateX) on the inner .ribbon-track,
+  // rather than the row's scrollLeft. transform runs on the compositor
+  // thread and doesn't force a synchronous layout/paint every frame the
+  // way animating scrollLeft does, which is what made the earlier version
+  // look jerky - this is smooth regardless of speed. The track's cards are
+  // rendered TWICE back-to-back (see renderRow), so once the translate
+  // passes the width of one full copy, we snap it back by that same width;
+  // since the second copy is pixel-identical to the first, the snap is
+  // invisible and the ticker loops forever. Pauses on hover/touch so
+  // someone can actually read a card.
+  const SCROLL_PX_PER_SEC = 55;
 
-  function startAutoScroll(container) {
+  function startAutoScroll(track, row) {
     let paused = false;
-    let rafId = null;
+    let pos = 0; // current translateX, in px (0 or negative)
     let lastTs = null;
 
-    container.addEventListener('mouseenter', () => { paused = true; });
-    container.addEventListener('mouseleave', () => { paused = false; });
-    container.addEventListener('touchstart', () => { paused = true; }, { passive: true });
-    container.addEventListener('touchend', () => { paused = false; });
+    row.addEventListener('mouseenter', () => { paused = true; });
+    row.addEventListener('mouseleave', () => { paused = false; });
+    row.addEventListener('touchstart', () => { paused = true; }, { passive: true });
+    row.addEventListener('touchend', () => { paused = false; });
 
     function step(ts) {
       if (lastTs == null) lastTs = ts;
       const dtSeconds = (ts - lastTs) / 1000;
       lastTs = ts;
 
-      const loopWidth = parseFloat(container.dataset.loopWidth || '0');
+      const loopWidth = parseFloat(track.dataset.loopWidth || '0');
       if (!paused && loopWidth > 0) {
-        container.scrollLeft += SCROLL_PX_PER_SEC * dtSeconds;
-        if (container.scrollLeft >= loopWidth) {
-          container.scrollLeft -= loopWidth;
-        }
+        pos -= SCROLL_PX_PER_SEC * dtSeconds;
+        if (pos <= -loopWidth) pos += loopWidth;
+        track.style.transform = `translateX(${pos}px)`;
       }
-      rafId = requestAnimationFrame(step);
+      track._autoScrollRafId = requestAnimationFrame(step);
     }
 
-    // Cancel any previous loop on this container before starting a new one
-    // (loadRibbon re-renders periodically-ish via manual reload).
-    if (container._autoScrollRafId) cancelAnimationFrame(container._autoScrollRafId);
-    rafId = requestAnimationFrame(step);
-    container._autoScrollRafId = rafId;
+    // Cancel any previous loop on this track before starting a new one.
+    if (track._autoScrollRafId) cancelAnimationFrame(track._autoScrollRafId);
+    track._autoScrollRafId = requestAnimationFrame(step);
   }
 
   // Renders one gender's row, most recent game first through oldest last -
   // the API returns oldest-first, so reverse it here. The card set is
   // duplicated back-to-back so the auto-scroll loop (see startAutoScroll)
   // has a second identical copy to snap back to, making the loop seamless.
-  function renderRow(container, games) {
+  function renderRow(track, games) {
+    const row = track.parentElement;
     if (!games.length) {
-      container.innerHTML = '<div class="empty-row muted">No results in the last 7 days.</div>';
-      container.dataset.loopWidth = '0';
+      track.innerHTML = '<div class="empty-row muted">No results in the last 7 days.</div>';
+      track.style.transform = 'translateX(0)';
+      track.dataset.loopWidth = '0';
       return;
     }
     const cardsHtml = games.slice().reverse().map(gameCardHtml).join('');
-    container.innerHTML = cardsHtml + cardsHtml;
-    container.scrollLeft = 0;
+    track.innerHTML = cardsHtml + cardsHtml;
+    track.style.transform = 'translateX(0)';
 
     // Measure after the browser has laid out the duplicated content - one
-    // "loop width" is half the full scrollWidth, i.e. the width of a
-    // single copy of the cards.
+    // "loop width" is half the track's full natural width, i.e. the width
+    // of a single copy of the cards.
     requestAnimationFrame(() => {
-      container.dataset.loopWidth = String(container.scrollWidth / 2);
+      track.dataset.loopWidth = String(track.scrollWidth / 2);
     });
 
-    startAutoScroll(container);
+    startAutoScroll(track, row);
   }
 
   async function loadRibbon() {
