@@ -8,8 +8,6 @@
   :root { --navy: #11213F; --gold: #E7C247; --bg: #F4F6FA; --border: #E1E5EC; --gray: #5A6472; --success: #1E7A46; --danger: #C0392B; }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, sans-serif; background: var(--bg); margin: 0; color: #1a1a1a; }
-  header { background: var(--navy); color: var(--gold); padding: 14px 20px; font-weight: 700; font-size: 17px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
-  header .window-range { color: #fff; font-weight: 400; font-size: 13px; }
   main { max-width: 1400px; margin: 0 auto; padding: 20px; }
   .muted { color: var(--gray); font-size: 13px; }
   .hint { text-align: center; color: var(--gray); font-size: 11.5px; margin: -8px 0 16px; }
@@ -21,9 +19,10 @@
   .ribbon-row { display: flex; align-items: center; gap: 8px; overflow-x: auto; padding: 12px; min-height: 110px; scrollbar-width: thin; }
 
   .game-card { flex: 0 0 auto; width: 138px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px; font-size: 11.5px; }
-  .game-card .div-name { font-size: 9.5px; text-transform: uppercase; color: var(--gray); font-weight: 700; letter-spacing: .02em; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .game-card .team-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 2px; }
+  .game-card .team-row { display: flex; align-items: center; gap: 5px; margin-bottom: 2px; }
+  .game-card .team-logo { flex: 0 0 auto; width: 16px; height: 16px; border-radius: 3px; object-fit: contain; background: #fff; border: 1px solid var(--border); }
   .game-card .team-name { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: #1a1a1a; }
+  .game-card .team-score { margin-left: auto; }
   .game-card .team-score { flex: 0 0 auto; font-weight: 700; color: var(--navy); font-variant-numeric: tabular-nums; }
   .game-card .team-row.winner .team-name, .game-card .team-row.winner .team-score { color: var(--success); }
   .game-card .game-time { margin-top: 5px; color: var(--gray); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -36,11 +35,6 @@
 </style>
 </head>
 <body>
-<header>
-  <span>USCCS Match Ribbon</span>
-  <span class="window-range" id="windowRangeLabel"></span>
-</header>
-
 <main>
   <div id="loadingMsg" class="muted">Loading recent results…</div>
   <div id="errorMsg"></div>
@@ -89,14 +83,22 @@
     const homeWins = hasScore && g.homeScore > g.awayScore;
     const awayWins = hasScore && g.awayScore > g.homeScore;
 
+    const homeLogo = g.homeTeamLogoUrl
+      ? `<img class="team-logo" src="${escapeHtml(g.homeTeamLogoUrl)}" alt="" onerror="this.style.display='none'" />`
+      : '';
+    const awayLogo = g.awayTeamLogoUrl
+      ? `<img class="team-logo" src="${escapeHtml(g.awayTeamLogoUrl)}" alt="" onerror="this.style.display='none'" />`
+      : '';
+
     return `
       <div class="game-card" title="${home} vs ${away}">
-        <div class="div-name">${escapeHtml(g.divisionName || '')}</div>
         <div class="team-row ${homeWins ? 'winner' : ''}">
+          ${homeLogo}
           <span class="team-name">${home}</span>
           <span class="team-score">${hasScore ? g.homeScore : '—'}</span>
         </div>
         <div class="team-row ${awayWins ? 'winner' : ''}">
+          ${awayLogo}
           <span class="team-name">${away}</span>
           <span class="team-score">${hasScore ? g.awayScore : '—'}</span>
         </div>
@@ -128,7 +130,6 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to load results');
 
-      document.getElementById('windowRangeLabel').textContent = formatWindowRange(data.windowStart, data.windowEnd);
       document.getElementById('menCount').textContent = '(' + data.men.length + ')';
       document.getElementById('womenCount').textContent = '(' + data.women.length + ')';
       renderRow(document.getElementById('menRow'), data.men);

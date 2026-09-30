@@ -62,6 +62,22 @@ pool.on('error', (err) => {
   console.error('[postgres] Unexpected error on idle client:', err.message);
 });
 
+// Additive, idempotent migration for the team-logo columns this app adds to
+// the shared schedule_games_cache table. Safe to run alongside
+// admin_server.js, which never references these columns and won't be
+// affected by their presence.
+async function ensureLogoColumns() {
+  try {
+    await pool.query(`
+      ALTER TABLE schedule_games_cache
+        ADD COLUMN IF NOT EXISTS home_team_logo_url text,
+        ADD COLUMN IF NOT EXISTS away_team_logo_url text
+    `);
+  } catch (err) {
+    console.error('[schedule-sync] Could not ensure logo columns exist:', err.message);
+  }
+}
+
 // ---------- SportsEngine OAuth (same pattern as the other apps) ----------
 
 let tokenCache = { accessToken: null, expiresAt: 0 };
@@ -221,7 +237,7 @@ const EVENTS_QUERY = `
     events(organizationId: $orgId, from: $from, to: $to, calendarEventType: GAME, page: $page, perPage: $perPage) {
       results {
         id
-        eventTeams { name score team { id program { primaryName } divisionId } homeTeam }
+        eventTeams { name score team { id program { primaryName } divisionId brand { logoUrl } } homeTeam }
         start
         subvenue { name venueId venueName }
         gameStatus
@@ -260,6 +276,8 @@ function extractGameInfo(event) {
     awayTeam: (away && away.name) || null,
     homeTeamId: (home && home.team && home.team.id) || null,
     awayTeamId: (away && away.team && away.team.id) || null,
+    homeTeamLogoUrl: (home && home.team && home.team.brand && home.team.brand.logoUrl) || null,
+    awayTeamLogoUrl: (away && away.team && away.team.brand && away.team.brand.logoUrl) || null,
     divisionId,
     gender,
     gameStatus: event.gameStatus || null,
@@ -355,15 +373,16 @@ async function runScheduleSync() {
     let syncedCount = 0;
     for (const g of pastGames) {
       await pool.query(
-        `INSERT INTO schedule_games_cache (game_id, start_time, division_id, gender, location_name, home_team, home_team_id, away_team, away_team_id, game_status, se_home_score, se_away_score, synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+        `INSERT INTO schedule_games_cache (game_id, start_time, division_id, gender, location_name, home_team, home_team_id, away_team, away_team_id, game_status, se_home_score, se_away_score, home_team_logo_url, away_team_logo_url, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
          ON CONFLICT (game_id) DO UPDATE SET
            start_time = EXCLUDED.start_time, division_id = EXCLUDED.division_id, gender = EXCLUDED.gender,
            location_name = EXCLUDED.location_name, home_team = EXCLUDED.home_team, home_team_id = EXCLUDED.home_team_id,
            away_team = EXCLUDED.away_team, away_team_id = EXCLUDED.away_team_id, game_status = EXCLUDED.game_status,
            se_home_score = EXCLUDED.se_home_score, se_away_score = EXCLUDED.se_away_score,
+           home_team_logo_url = EXCLUDED.home_team_logo_url, away_team_logo_url = EXCLUDED.away_team_logo_url,
            synced_at = now()`,
-        [g.eventId, g.startTime, g.divisionId, g.gender, g.locationName, g.homeTeam, g.homeTeamId, g.awayTeam, g.awayTeamId, g.gameStatus, g.homeScore, g.awayScore]
+        [g.eventId, g.startTime, g.divisionId, g.gender, g.locationName, g.homeTeam, g.homeTeamId, g.awayTeam, g.awayTeamId, g.gameStatus, g.homeScore, g.awayScore, g.homeTeamLogoUrl, g.awayTeamLogoUrl]
       );
       syncedCount++;
     }
@@ -385,7 +404,7 @@ async function getRibbonPayload() {
   const windowEnd = getEndOfTodayEastern(now);
 
   const result = await pool.query(
-    `SELECT game_id, start_time, division_id, gender, home_team, away_team, game_status, se_home_score, se_away_score
+    `SELECT game_id, start_time, division_id, gender, home_team, away_team, game_status, se_home_score, se_away_score, home_team_logo_url, away_team_logo_url
      FROM schedule_games_cache
      WHERE start_time >= $1 AND start_time <= $2
      ORDER BY start_time ASC`,
@@ -403,6 +422,8 @@ async function getRibbonPayload() {
     isCompleted: r.game_status === 'COMPLETED',
     homeScore: r.se_home_score,
     awayScore: r.se_away_score,
+    homeTeamLogoUrl: r.home_team_logo_url,
+    awayTeamLogoUrl: r.away_team_logo_url,
   }));
 
   const men = games.filter((g) => g.gender === 'Men');
@@ -452,7 +473,10 @@ server.listen(PORT, () => {
     console.warn('WARNING: DATABASE_URL is not set - /api/ribbon will fail.');
   }
   // Run once immediately on startup so there's data to show right away,
-  // then on the configured interval from then on.
-  runScheduleSync();
-  setInterval(runScheduleSync, SYNC_INTERVAL_MINUTES * 60 * 1000);
+  // then on the configured interval from then on. The column migration is
+  // awaited first so the very first sync can write logo URLs.
+  ensureLogoColumns().then(() => {
+    runScheduleSync();
+    setInterval(runScheduleSync, SYNC_INTERVAL_MINUTES * 60 * 1000);
+  });
 });
