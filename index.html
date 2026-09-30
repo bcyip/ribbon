@@ -5,23 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>USCCS Match Ribbon</title>
 <style>
-  :root { --navy: #11213F; --gold: #E7C247; --bg: #F4F6FA; --border: #E1E5EC; --gray: #5A6472; --success: #1E7A46; --danger: #C0392B; }
+  :root { --navy: #11213F; --blue: #6BC4E8; --bg: #F4F6FA; --border: #E1E5EC; --gray: #5A6472; --success: #1E7A46; --danger: #C0392B; }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, sans-serif; background: var(--bg); margin: 0; color: #1a1a1a; }
-  main { max-width: 1400px; margin: 0 auto; padding: 0 20px; }
+  main { max-width: none; margin: 0; padding: 0; }
   .muted { color: var(--gray); font-size: 13px; }
 
-  .ribbon-block { background: #fff; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .ribbon-block { background: #fff; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); overflow: hidden; }
 
-  /* Divider between the two rows: a single bar carrying both labels, each
-     paired with a small color swatch that matches the accent stripe on its
-     row, so the color-to-gender mapping is visible in one glance instead
-     of needing two separate full-width headers. */
-  .ribbon-divider { display: flex; align-items: center; justify-content: center; gap: 28px; padding: 7px 16px; background: var(--bg); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  /* Divider bar, now BELOW both rows: carries both labels, each paired
+     with a small color swatch that matches the background of its row
+     (above), so the color-to-gender mapping is visible in one glance
+     instead of needing two separate full-width headers. */
+  .ribbon-divider { display: flex; align-items: center; justify-content: center; gap: 28px; padding: 7px 16px; background: var(--bg); border-top: 1px solid var(--border); }
   .divider-tag { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--navy); }
   .divider-swatch { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
   .divider-swatch.men { background: var(--navy); }
-  .divider-swatch.women { background: var(--gold); }
+  .divider-swatch.women { background: var(--blue); }
 
   /* The row itself is just an overflow-hidden window; its background IS
      the gender color (not just an edge stripe), so any gap around/between
@@ -33,7 +33,7 @@
      source of the jerkiness). */
   .ribbon-row { overflow: hidden; }
   .ribbon-row.men { background: var(--navy); }
-  .ribbon-row.women { background: var(--gold); }
+  .ribbon-row.women { background: var(--blue); }
   .ribbon-track { display: flex; align-items: center; gap: 10px; padding: 10px; width: max-content; will-change: transform; }
 
   .game-card { flex: 0 0 auto; width: 190px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px; font-size: 15px; }
@@ -60,11 +60,11 @@
   <div id="ribbonContent" style="display:none;">
     <div class="ribbon-block">
       <div class="ribbon-row men"><div class="ribbon-track" id="menRow"></div></div>
+      <div class="ribbon-row women"><div class="ribbon-track" id="womenRow"></div></div>
       <div class="ribbon-divider">
         <span class="divider-tag"><span class="divider-swatch men"></span>Men's</span>
         <span class="divider-tag"><span class="divider-swatch women"></span>Women's</span>
       </div>
-      <div class="ribbon-row women"><div class="ribbon-track" id="womenRow"></div></div>
     </div>
   </div>
 </main>
