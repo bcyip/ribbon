@@ -31,10 +31,17 @@
      on the compositor thread - much smoother than animating scrollLeft,
      which forces a synchronous layout/paint every frame and was the
      source of the jerkiness). */
-  .ribbon-row { overflow: hidden; }
+  /* cursor: grab / touch-action: pan-y / user-select: none support manual
+     dragging (see the pointer event handlers in startAutoScroll): pan-y
+     lets a vertical swipe still scroll the page normally while leaving
+     horizontal touch movement free for our own drag logic, and
+     user-select keeps a drag from also highlighting card text. */
+  .ribbon-row { overflow: hidden; cursor: grab; touch-action: pan-y; user-select: none; }
   .ribbon-row.men { background: var(--navy); }
   .ribbon-row.women { background: var(--blue); }
+  .ribbon-row.dragging { cursor: grabbing; }
   .ribbon-track { display: flex; align-items: center; gap: 10px; padding: 10px; width: max-content; will-change: transform; }
+  .ribbon-track img { -webkit-user-drag: none; user-drag: none; pointer-events: none; }
 
   .game-card { flex: 0 0 auto; width: 190px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px; font-size: 15px; }
   .game-card .team-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -134,29 +141,84 @@
   // passes the width of one full copy, we snap it back by that same width;
   // since the second copy is pixel-identical to the first, the snap is
   // invisible and the ticker loops forever. Pauses on hover/touch so
-  // someone can actually read a card.
+  // someone can actually read a card - and can also be grabbed and
+  // dragged (mouse or touch, via Pointer Events) to browse manually at
+  // any moment; auto-scroll just picks back up from wherever the drag
+  // left it.
   const SCROLL_PX_PER_SEC = 55;
 
   function startAutoScroll(track, row) {
-    let paused = false;
-    let pos = 0; // current translateX, in px (0 or negative)
-    let lastTs = null;
+    // Tear down any listeners a previous call attached to this same row
+    // (e.g. if the ribbon is ever re-rendered) before attaching new ones,
+    // so state objects and handlers from an old render can't pile up.
+    if (row._dragAbortController) row._dragAbortController.abort();
+    const abortController = new AbortController();
+    row._dragAbortController = abortController;
+    const { signal } = abortController;
 
-    row.addEventListener('mouseenter', () => { paused = true; });
-    row.addEventListener('mouseleave', () => { paused = false; });
-    row.addEventListener('touchstart', () => { paused = true; }, { passive: true });
-    row.addEventListener('touchend', () => { paused = false; });
+    // One shared mutable state object per row, read/written by both the
+    // rAF animation loop and the drag handlers below.
+    const state = { paused: false, dragging: false, pos: 0, lastTs: null, dragStartClientX: 0, dragStartPos: 0 };
+
+    // Wraps a translateX position into the single "loop width" (the width
+    // of one copy of the cards) using modulo, so dragging past either end
+    // lands back on the duplicate copy at the equivalent spot - same
+    // seamless-loop trick the auto-scroll step() uses below, just applied
+    // in either direction instead of only forward.
+    function wrapPos(p) {
+      const loopWidth = parseFloat(track.dataset.loopWidth || '0');
+      if (loopWidth <= 0) return 0;
+      let wrapped = p % loopWidth;
+      if (wrapped > 0) wrapped -= loopWidth;
+      return wrapped;
+    }
+
+    row.addEventListener('mouseenter', () => { state.paused = true; }, { signal });
+    row.addEventListener('mouseleave', () => {
+      // Don't resume mid-drag just because the pointer slipped past the
+      // row's edge while dragging - pointer capture keeps the drag going.
+      if (!state.dragging) state.paused = false;
+    }, { signal });
+    row.addEventListener('touchstart', () => { state.paused = true; }, { passive: true, signal });
+    row.addEventListener('touchend', () => { if (!state.dragging) state.paused = false; }, { signal });
+
+    row.addEventListener('pointerdown', (e) => {
+      state.dragging = true;
+      state.paused = true;
+      state.dragStartClientX = e.clientX;
+      state.dragStartPos = state.pos;
+      row.classList.add('dragging');
+      try { row.setPointerCapture(e.pointerId); } catch (err) { /* older browsers - drag still works, just without capture */ }
+    }, { signal });
+    row.addEventListener('pointermove', (e) => {
+      if (!state.dragging) return;
+      const deltaX = e.clientX - state.dragStartClientX;
+      state.pos = wrapPos(state.dragStartPos + deltaX);
+      track.style.transform = `translateX(${state.pos}px)`;
+    }, { signal });
+    function endDrag(e) {
+      if (!state.dragging) return;
+      state.dragging = false;
+      row.classList.remove('dragging');
+      try { row.releasePointerCapture(e.pointerId); } catch (err) { /* already released/unsupported */ }
+      // Mouse: stay paused if still hovering (matches ordinary hover-pause
+      // behavior) - mouseleave will resume it. Touch/pen has no hover
+      // concept, so resume right away, matching the old touchend behavior.
+      if (e.pointerType !== 'mouse') state.paused = false;
+    }
+    row.addEventListener('pointerup', endDrag, { signal });
+    row.addEventListener('pointercancel', endDrag, { signal });
 
     function step(ts) {
-      if (lastTs == null) lastTs = ts;
-      const dtSeconds = (ts - lastTs) / 1000;
-      lastTs = ts;
+      if (state.lastTs == null) state.lastTs = ts;
+      const dtSeconds = (ts - state.lastTs) / 1000;
+      state.lastTs = ts;
 
       const loopWidth = parseFloat(track.dataset.loopWidth || '0');
-      if (!paused && loopWidth > 0) {
-        pos -= SCROLL_PX_PER_SEC * dtSeconds;
-        if (pos <= -loopWidth) pos += loopWidth;
-        track.style.transform = `translateX(${pos}px)`;
+      if (!state.paused && !state.dragging && loopWidth > 0) {
+        state.pos -= SCROLL_PX_PER_SEC * dtSeconds;
+        if (state.pos <= -loopWidth) state.pos += loopWidth;
+        track.style.transform = `translateX(${state.pos}px)`;
       }
       track._autoScrollRafId = requestAnimationFrame(step);
     }
