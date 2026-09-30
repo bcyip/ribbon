@@ -1,33 +1,41 @@
-// USCCS Match Ribbon — standalone page showing a rolling 7-day window of
-// games (3 days back through 3 days ahead, today always in the middle),
-// split into a Men's row and a Women's row. Within each row, completed
-// games sit left of a center divider (oldest furthest left, most recently
-// completed nearest the divider) and upcoming games sit right of it
-// (soonest first, furthest out on the right). If a row has no completed
-// games yet, its upcoming games fill the entire row instead of being
-// pushed to one side.
+// USCCS Match Ribbon — standalone page showing the last 7 days' completed
+// results, split into a Men's row and a Women's row. Each row is a single
+// horizontally-scrollable strip, oldest on the left and most recent on the
+// right - the page loads scrolled to the right edge of each row, so the
+// most recent results are what's visible first, and scrolling left reveals
+// results from further back.
 //
-// Deliberately has NO database of its own - unlike every other app in this
-// project, this page reads directly from SportsEngine on every request
-// (per explicit direction), since it only ever needs "what does this one
-// week look like right now" and has nothing worth persisting.
+// ARCHITECTURE: every page load reads ONLY from Postgres (the same
+// Supabase database the other apps share, specifically the
+// `schedule_games_cache` table admin_server.js already maintains for its
+// own match-reports page) - never a live SportsEngine call on the request
+// path. A live SportsEngine pull across the whole org is genuinely slow
+// (multiple paginated GraphQL round trips), which is exactly what made the
+// original all-live-queries version of this app too slow to be usable.
+//
+// Instead, a background job on a timer (runScheduleSync, see below) is the
+// ONLY thing that talks to SportsEngine, and it does so off the request
+// path entirely: it pulls the last several days of games and upserts them
+// into schedule_games_cache, the same table admin_server.js's own "Sync
+// Historical Games" button writes to (same schema, same ON CONFLICT
+// upsert) - so this app's background sync also keeps that shared cache
+// fresher for the admin console, as a side benefit, without either app
+// needing to know about the other's sync runs.
 //
 // REQUIRED ENVIRONMENT VARIABLES:
+//   DATABASE_URL                    - same Supabase Postgres instance the other apps use
 //   SE_CLIENT_ID, SE_CLIENT_SECRET  - same SportsEngine app registration used elsewhere
-//   SE_RIBBON_REFRESH_TOKEN         - this app's OWN refresh token. Per this project's
-//                                      established rule, a refresh token is never reused
-//                                      across apps - get a fresh one for this app the same
-//                                      way the others were obtained (authorize URL + this
-//                                      app's own redirect URI in Postman), rather than
-//                                      copying SE_REFRESH_TOKEN / SE_DATA_REFRESH_TOKEN
-//                                      from another app's config.
+//   SE_RIBBON_REFRESH_TOKEN         - this app's OWN refresh token (never reused across apps -
+//                                      see the notes from setting this app up for how to get one)
 //   SE_ORG_ID                       - same org ID used everywhere else (e.g. 356507)
+//   SYNC_INTERVAL_MINUTES           - (optional) how often the background sync runs, defaults to 60
 //   PORT                            - (optional) most hosts set this automatically
 
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const { Pool } = require('pg');
 
 const PORT = process.env.PORT || 8787;
 const HTML_FILE = path.join(__dirname, 'index.html');
@@ -36,6 +44,23 @@ const SE_CLIENT_ID = process.env.SE_CLIENT_ID;
 const SE_CLIENT_SECRET = process.env.SE_CLIENT_SECRET;
 const SE_RIBBON_REFRESH_TOKEN = process.env.SE_RIBBON_REFRESH_TOKEN;
 const SE_ORG_ID = process.env.SE_ORG_ID;
+const SYNC_INTERVAL_MINUTES = parseFloat(process.env.SYNC_INTERVAL_MINUTES || '60');
+
+// How many days back the ribbon displays and syncs. Synced with a 1-day
+// buffer beyond the display window (see runScheduleSync) so the display
+// window is always fully covered even right at a sync boundary.
+const DISPLAY_DAYS_BACK = 6; // + today = 7 days total
+
+// ---------- Postgres ----------
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+pool.on('error', (err) => {
+  console.error('[postgres] Unexpected error on idle client:', err.message);
+});
 
 // ---------- SportsEngine OAuth (same pattern as the other apps) ----------
 
@@ -126,9 +151,7 @@ function seSleep(ms) {
 }
 
 // Division ID -> {name, gender} lookup, copied verbatim from the schedule
-// monitor / other apps in this project (same 61 divisions) - used as a
-// fallback for gender when the team's program name itself doesn't say
-// "men"/"women" clearly.
+// monitor / other apps in this project (same 61 divisions).
 const DIVISION_LOOKUP = {
   '6a4439745407815052443199': { name: 'AL/MS', gender: 'Men' },
   '6a4439745407813fac44341f': { name: 'Baltimore', gender: 'Men' },
@@ -198,7 +221,7 @@ const EVENTS_QUERY = `
     events(organizationId: $orgId, from: $from, to: $to, calendarEventType: GAME, page: $page, perPage: $perPage) {
       results {
         id
-        eventTeams { name score team { id program { primaryName } divisionId brand { logoUrl } } homeTeam }
+        eventTeams { name score team { id program { primaryName } divisionId } homeTeam }
         start
         subvenue { name venueId venueName }
         gameStatus
@@ -235,12 +258,11 @@ function extractGameInfo(event) {
     locationName,
     homeTeam: (home && home.name) || null,
     awayTeam: (away && away.name) || null,
-    homeLogoUrl: (home && home.team && home.team.brand && home.team.brand.logoUrl) || null,
-    awayLogoUrl: (away && away.team && away.team.brand && away.team.brand.logoUrl) || null,
-    divisionName: (divisionInfo && divisionInfo.name) || null,
+    homeTeamId: (home && home.team && home.team.id) || null,
+    awayTeamId: (away && away.team && away.team.id) || null,
+    divisionId,
     gender,
     gameStatus: event.gameStatus || null,
-    isCompleted: event.gameStatus === 'COMPLETED',
     homeScore: (home && home.score != null) ? home.score : null,
     awayScore: (away && away.score != null) ? away.score : null,
   };
@@ -251,12 +273,7 @@ async function fetchGamesInRange(from, to) {
   let page = 1;
   let totalPages = 1;
   const PER_PAGE = 40; // same conservative value used elsewhere in this project - 100/page hits SportsEngine's complexity limit
-  // The 1000-1500ms delay used elsewhere in this project is sized for
-  // pulling an entire season across 100+ pages - massive overkill for this
-  // app's 7-day, single-org window, which is normally just a handful of
-  // pages. Cut way down so a multi-page pull doesn't itself become the
-  // slow part of the request.
-  const PAGE_DELAY_MS = 200;
+  const PAGE_DELAY_MS = 200; // this is a small, backgrounded sync, not a full-season pull - no need for a large inter-page delay
 
   do {
     const data = await callGraphQL(EVENTS_QUERY, { orgId: parseInt(SE_ORG_ID, 10), from, to, page, perPage: PER_PAGE });
@@ -279,15 +296,8 @@ async function fetchGamesInRange(from, to) {
   return deduped.map(extractGameInfo);
 }
 
-// ---------- Rolling 7-day window centered on today, in Eastern time ----------
-//
-// "This week" for the ribbon always means: 3 days before today through 3
-// days after today (Eastern calendar date), 7 days total with today
-// exactly in the middle. Unlike a fixed calendar week, this shifts by one
-// day every day - so completed games from the last few days are always on
-// the left and upcoming games from the next few days are always on the
-// right, no matter what day of the week it is. Computed fresh on every
-// request - there's nothing to cache, this app has no database.
+// ---------- Eastern-time day helpers ----------
+
 function getEasternDateParts(date) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
@@ -303,70 +313,102 @@ function getEasternDayBounds(y, m, d) {
   }).formatToParts(probe);
   const offsetHours = parseInt(offsetParts.find((p) => p.type === 'timeZoneName').value.replace('GMT', ''), 10);
   const start = new Date(Date.UTC(y, m - 1, d, 0, 0, 0) - offsetHours * 60 * 60 * 1000);
-  return start;
+  const end = new Date(Date.UTC(y, m - 1, d + 1, 0, 0, 0) - offsetHours * 60 * 60 * 1000 - 1000);
+  return { start, end };
 }
 
-const DAYS_BEFORE_TODAY = 3;
-const DAYS_AFTER_TODAY = 3;
+function getEndOfTodayEastern(now) {
+  const { year, month, day } = getEasternDateParts(now);
+  return getEasternDayBounds(year, month, day).end;
+}
 
-function getRollingWeekWindow(now) {
+function daysAgoEasternStart(now, daysBack) {
   const { year, month, day } = getEasternDateParts(now);
   const todayUtcNoon = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
-
-  const startProbe = new Date(todayUtcNoon.getTime() - DAYS_BEFORE_TODAY * 24 * 60 * 60 * 1000);
-  const sp = getEasternDateParts(startProbe);
-  const weekStart = getEasternDayBounds(sp.year, sp.month, sp.day); // (today - 3 days) 00:00 ET
-
-  const endProbe = new Date(todayUtcNoon.getTime() + DAYS_AFTER_TODAY * 24 * 60 * 60 * 1000);
-  const ep = getEasternDateParts(endProbe);
-  const weekEnd = new Date(getEasternDayBounds(ep.year, ep.month, ep.day).getTime() + 24 * 60 * 60 * 1000 - 1000); // (today + 3 days) 23:59:59 ET
-
-  return { weekStart, weekEnd };
+  const probe = new Date(todayUtcNoon.getTime() - daysBack * 24 * 60 * 60 * 1000);
+  const p = getEasternDateParts(probe);
+  return getEasternDayBounds(p.year, p.month, p.day).start;
 }
 
-// Short-lived in-memory cache - NOT a database, just avoids re-pulling the
-// entire org's schedule from SportsEngine (the genuinely slow part) on
-// every single page load. A few minutes of staleness is a non-issue for a
-// "what does this week look like" ribbon. Keyed by the week window itself
-// (which naturally changes once a day), so a fresh window always misses.
-// `pending` dedupes concurrent requests during a cache miss - two people
-// loading the page in the same moment share one SportsEngine fetch instead
-// of each triggering their own.
-const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
-let ribbonCache = { key: null, expiresAt: 0, payload: null, pending: null };
-
-async function getRibbonPayload(now) {
-  const { weekStart, weekEnd } = getRollingWeekWindow(now);
-  const cacheKey = weekStart.toISOString() + '|' + weekEnd.toISOString();
-
-  if (ribbonCache.key === cacheKey && ribbonCache.payload && Date.now() < ribbonCache.expiresAt) {
-    return ribbonCache.payload;
-  }
-  if (ribbonCache.key === cacheKey && ribbonCache.pending) {
-    return ribbonCache.pending;
-  }
-
-  const fetchPromise = (async () => {
-    const games = await fetchGamesInRange(weekStart.toISOString(), weekEnd.toISOString());
-    const men = games.filter((g) => g.gender === 'Men').sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
-    const women = games.filter((g) => g.gender === 'Women').sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
-    const payload = { weekStart: weekStart.toISOString(), weekEnd: weekEnd.toISOString(), now: now.toISOString(), men, women };
-    ribbonCache = { key: cacheKey, expiresAt: Date.now() + CACHE_TTL_MS, payload, pending: null };
-    return payload;
-  })();
-
-  ribbonCache = { key: cacheKey, expiresAt: 0, payload: null, pending: fetchPromise };
-
+// ---------- Background sync: SportsEngine -> schedule_games_cache ----------
+//
+// The only thing in this app that ever calls SportsEngine. Runs on a timer,
+// off the request path, and upserts into the SAME schedule_games_cache
+// table admin_server.js's "Sync Historical Games" button uses (identical
+// schema, identical ON CONFLICT upsert) - so this app's background runs
+// also keep that shared cache fresher for the admin console.
+//
+// Pulls DISPLAY_DAYS_BACK + 1 days of buffer through the end of today
+// (Eastern) - past games only, same "never sync past today" rule the admin
+// console's own sync uses, since this cache is specifically for results
+// that have already happened.
+async function runScheduleSync() {
+  const startedAt = Date.now();
   try {
-    return await fetchPromise;
-  } catch (err) {
-    // Don't leave a broken in-flight promise cached after a failure - the
-    // next request should get a fresh attempt, not a cached rejection.
-    if (ribbonCache.key === cacheKey && ribbonCache.pending === fetchPromise) {
-      ribbonCache = { key: null, expiresAt: 0, payload: null, pending: null };
+    const now = new Date();
+    const endOfTodayEastern = getEndOfTodayEastern(now);
+    const rangeFrom = daysAgoEasternStart(now, DISPLAY_DAYS_BACK + 1); // 1 extra day of buffer
+
+    const games = await fetchGamesInRange(rangeFrom.toISOString(), endOfTodayEastern.toISOString());
+    const pastGames = games.filter((g) => g.startTime && new Date(g.startTime) <= endOfTodayEastern);
+
+    let syncedCount = 0;
+    for (const g of pastGames) {
+      await pool.query(
+        `INSERT INTO schedule_games_cache (game_id, start_time, division_id, gender, location_name, home_team, home_team_id, away_team, away_team_id, game_status, se_home_score, se_away_score, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+         ON CONFLICT (game_id) DO UPDATE SET
+           start_time = EXCLUDED.start_time, division_id = EXCLUDED.division_id, gender = EXCLUDED.gender,
+           location_name = EXCLUDED.location_name, home_team = EXCLUDED.home_team, home_team_id = EXCLUDED.home_team_id,
+           away_team = EXCLUDED.away_team, away_team_id = EXCLUDED.away_team_id, game_status = EXCLUDED.game_status,
+           se_home_score = EXCLUDED.se_home_score, se_away_score = EXCLUDED.se_away_score,
+           synced_at = now()`,
+        [g.eventId, g.startTime, g.divisionId, g.gender, g.locationName, g.homeTeam, g.homeTeamId, g.awayTeam, g.awayTeamId, g.gameStatus, g.homeScore, g.awayScore]
+      );
+      syncedCount++;
     }
-    throw err;
+
+    console.log(`[schedule-sync] Synced ${syncedCount} games in ${Date.now() - startedAt}ms.`);
+  } catch (err) {
+    // Never let a failed sync crash the server or block the next scheduled
+    // attempt - the ribbon just serves whatever's already cached until the
+    // next run succeeds.
+    console.error('[schedule-sync] Error (will retry on next scheduled run):', err.message);
   }
+}
+
+// ---------- Serving the ribbon from Postgres ----------
+
+async function getRibbonPayload() {
+  const now = new Date();
+  const windowStart = daysAgoEasternStart(now, DISPLAY_DAYS_BACK);
+  const windowEnd = getEndOfTodayEastern(now);
+
+  const result = await pool.query(
+    `SELECT game_id, start_time, division_id, gender, home_team, away_team, game_status, se_home_score, se_away_score
+     FROM schedule_games_cache
+     WHERE start_time >= $1 AND start_time <= $2
+     ORDER BY start_time ASC`,
+    [windowStart, windowEnd]
+  );
+
+  const games = result.rows.map((r) => ({
+    gameId: r.game_id,
+    startTime: r.start_time,
+    divisionName: (DIVISION_LOOKUP[r.division_id] && DIVISION_LOOKUP[r.division_id].name) || null,
+    gender: r.gender,
+    homeTeam: r.home_team,
+    awayTeam: r.away_team,
+    gameStatus: r.game_status,
+    isCompleted: r.game_status === 'COMPLETED',
+    homeScore: r.se_home_score,
+    awayScore: r.se_away_score,
+  }));
+
+  const men = games.filter((g) => g.gender === 'Men');
+  const women = games.filter((g) => g.gender === 'Women');
+
+  return { windowStart: windowStart.toISOString(), windowEnd: windowEnd.toISOString(), men, women };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -374,7 +416,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/api/ribbon') {
     try {
-      const payload = await getRibbonPayload(new Date());
+      const payload = await getRibbonPayload();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(payload));
     } catch (err) {
@@ -389,7 +431,7 @@ const server = http.createServer(async (req, res) => {
     fs.readFile(HTML_FILE, 'utf8', (err, data) => {
       if (err) {
         res.writeHead(404);
-        return res.end('ribbon_index.html not found — make sure it is in the same folder as ribbon_server.js');
+        return res.end('index.html not found — make sure it is in the same folder as server.js');
       }
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(data);
@@ -404,6 +446,13 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`Match ribbon running on port ${PORT}`);
   if (!SE_CLIENT_ID || !SE_CLIENT_SECRET || !SE_RIBBON_REFRESH_TOKEN || !SE_ORG_ID) {
-    console.warn('WARNING: one or more SportsEngine env vars are missing (SE_CLIENT_ID, SE_CLIENT_SECRET, SE_RIBBON_REFRESH_TOKEN, SE_ORG_ID) - /api/ribbon will fail until they are set.');
+    console.warn('WARNING: one or more SportsEngine env vars are missing (SE_CLIENT_ID, SE_CLIENT_SECRET, SE_RIBBON_REFRESH_TOKEN, SE_ORG_ID) - the background sync will fail until they are set, and the ribbon will only ever show whatever is already cached.');
   }
+  if (!process.env.DATABASE_URL) {
+    console.warn('WARNING: DATABASE_URL is not set - /api/ribbon will fail.');
+  }
+  // Run once immediately on startup so there's data to show right away,
+  // then on the configured interval from then on.
+  runScheduleSync();
+  setInterval(runScheduleSync, SYNC_INTERVAL_MINUTES * 60 * 1000);
 });
