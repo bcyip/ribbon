@@ -163,10 +163,15 @@ async function getRibbonPayload() {
   const windowStart = daysAgoEasternStart(now, DISPLAY_DAYS_BACK);
   const windowEnd = getEndOfTodayEastern(now);
 
+  // Only games SportsEngine has as COMPLETED or SCHEDULED are shown - a
+  // CANCELED, POSTPONED, FORFEITED, or otherwise irregular status is
+  // excluded entirely rather than displayed with a stale or misleading
+  // score.
   const result = await pool.query(
     `SELECT game_id, start_time, division_id, gender, home_team, away_team, game_status, se_home_score, se_away_score, home_team_logo_url, away_team_logo_url
      FROM schedule_games_cache
      WHERE start_time >= $1 AND start_time <= $2
+       AND game_status IN ('COMPLETED', 'SCHEDULED')
      ORDER BY start_time ASC`,
     [windowStart, windowEnd]
   );
