@@ -30,7 +30,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 8787;
-const HTML_FILE = path.join(__dirname, 'ribbon_index.html');
+const HTML_FILE = path.join(__dirname, 'index.html');
 
 const SE_CLIENT_ID = process.env.SE_CLIENT_ID;
 const SE_CLIENT_SECRET = process.env.SE_CLIENT_SECRET;
