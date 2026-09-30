@@ -10,11 +10,9 @@
   body { font-family: -apple-system, sans-serif; background: var(--bg); margin: 0; color: #1a1a1a; }
   main { max-width: 1400px; margin: 0 auto; padding: 20px; }
   .muted { color: var(--gray); font-size: 13px; }
-  .hint { text-align: center; color: var(--gray); font-size: 11.5px; margin: -8px 0 16px; }
 
   .ribbon-section { background: #fff; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; overflow: hidden; }
   .ribbon-label { display: flex; align-items: center; gap: 8px; padding: 10px 16px; font-weight: 700; color: var(--navy); font-size: 13.5px; text-transform: uppercase; letter-spacing: .03em; border-bottom: 1px solid var(--border); background: var(--bg); }
-  .ribbon-label .count { font-weight: 400; color: var(--gray); text-transform: none; font-size: 12px; letter-spacing: normal; }
 
   .ribbon-row { display: flex; align-items: center; gap: 8px; overflow-x: auto; padding: 12px; min-height: 110px; scrollbar-width: thin; }
 
@@ -40,13 +38,12 @@
   <div id="errorMsg"></div>
 
   <div id="ribbonContent" style="display:none;">
-    <p class="hint">Most recent results on the right — scroll left for earlier results.</p>
     <div class="ribbon-section">
-      <div class="ribbon-label">Men's <span class="count" id="menCount"></span></div>
+      <div class="ribbon-label">Men's</div>
       <div class="ribbon-row" id="menRow"></div>
     </div>
     <div class="ribbon-section">
-      <div class="ribbon-label">Women's <span class="count" id="womenCount"></span></div>
+      <div class="ribbon-label">Women's</div>
       <div class="ribbon-row" id="womenRow"></div>
     </div>
   </div>
@@ -107,17 +104,17 @@
     `;
   }
 
-  // Renders one gender's row, oldest game on the left through most recent
-  // on the right (the order the API already returns them in), then scrolls
-  // the row to its right edge so the most recent results are what's
-  // visible without having to scroll.
+  // Renders one gender's row, most recent game on the left through oldest
+  // on the right - the API returns oldest-first, so reverse it here. The
+  // row's default scroll position (0, i.e. its left edge) already shows
+  // the most recent results, so no scroll adjustment is needed; scrolling
+  // right reveals progressively older ones.
   function renderRow(container, games) {
     if (!games.length) {
       container.innerHTML = '<div class="empty-row muted">No results in the last 7 days.</div>';
       return;
     }
-    container.innerHTML = games.map(gameCardHtml).join('');
-    container.scrollLeft = container.scrollWidth;
+    container.innerHTML = games.slice().reverse().map(gameCardHtml).join('');
   }
 
   async function loadRibbon() {
@@ -130,8 +127,6 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to load results');
 
-      document.getElementById('menCount').textContent = '(' + data.men.length + ')';
-      document.getElementById('womenCount').textContent = '(' + data.women.length + ')';
       renderRow(document.getElementById('menRow'), data.men);
       renderRow(document.getElementById('womenRow'), data.women);
 
