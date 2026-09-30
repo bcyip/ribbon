@@ -251,7 +251,12 @@ async function fetchGamesInRange(from, to) {
   let page = 1;
   let totalPages = 1;
   const PER_PAGE = 40; // same conservative value used elsewhere in this project - 100/page hits SportsEngine's complexity limit
-  const PAGE_DELAY_MS = 1000;
+  // The 1000-1500ms delay used elsewhere in this project is sized for
+  // pulling an entire season across 100+ pages - massive overkill for this
+  // app's 7-day, single-org window, which is normally just a handful of
+  // pages. Cut way down so a multi-page pull doesn't itself become the
+  // slow part of the request.
+  const PAGE_DELAY_MS = 200;
 
   do {
     const data = await callGraphQL(EVENTS_QUERY, { orgId: parseInt(SE_ORG_ID, 10), from, to, page, perPage: PER_PAGE });
@@ -319,26 +324,59 @@ function getRollingWeekWindow(now) {
   return { weekStart, weekEnd };
 }
 
+// Short-lived in-memory cache - NOT a database, just avoids re-pulling the
+// entire org's schedule from SportsEngine (the genuinely slow part) on
+// every single page load. A few minutes of staleness is a non-issue for a
+// "what does this week look like" ribbon. Keyed by the week window itself
+// (which naturally changes once a day), so a fresh window always misses.
+// `pending` dedupes concurrent requests during a cache miss - two people
+// loading the page in the same moment share one SportsEngine fetch instead
+// of each triggering their own.
+const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
+let ribbonCache = { key: null, expiresAt: 0, payload: null, pending: null };
+
+async function getRibbonPayload(now) {
+  const { weekStart, weekEnd } = getRollingWeekWindow(now);
+  const cacheKey = weekStart.toISOString() + '|' + weekEnd.toISOString();
+
+  if (ribbonCache.key === cacheKey && ribbonCache.payload && Date.now() < ribbonCache.expiresAt) {
+    return ribbonCache.payload;
+  }
+  if (ribbonCache.key === cacheKey && ribbonCache.pending) {
+    return ribbonCache.pending;
+  }
+
+  const fetchPromise = (async () => {
+    const games = await fetchGamesInRange(weekStart.toISOString(), weekEnd.toISOString());
+    const men = games.filter((g) => g.gender === 'Men').sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+    const women = games.filter((g) => g.gender === 'Women').sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+    const payload = { weekStart: weekStart.toISOString(), weekEnd: weekEnd.toISOString(), now: now.toISOString(), men, women };
+    ribbonCache = { key: cacheKey, expiresAt: Date.now() + CACHE_TTL_MS, payload, pending: null };
+    return payload;
+  })();
+
+  ribbonCache = { key: cacheKey, expiresAt: 0, payload: null, pending: fetchPromise };
+
+  try {
+    return await fetchPromise;
+  } catch (err) {
+    // Don't leave a broken in-flight promise cached after a failure - the
+    // next request should get a fresh attempt, not a cached rejection.
+    if (ribbonCache.key === cacheKey && ribbonCache.pending === fetchPromise) {
+      ribbonCache = { key: null, expiresAt: 0, payload: null, pending: null };
+    }
+    throw err;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
 
   if (req.method === 'GET' && url.pathname === '/api/ribbon') {
     try {
-      const now = new Date();
-      const { weekStart, weekEnd } = getRollingWeekWindow(now);
-      const games = await fetchGamesInRange(weekStart.toISOString(), weekEnd.toISOString());
-
-      const men = games.filter((g) => g.gender === 'Men').sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
-      const women = games.filter((g) => g.gender === 'Women').sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
-
+      const payload = await getRibbonPayload(new Date());
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        weekStart: weekStart.toISOString(),
-        weekEnd: weekEnd.toISOString(),
-        now: now.toISOString(),
-        men,
-        women,
-      }));
+      res.end(JSON.stringify(payload));
     } catch (err) {
       console.error('[api/ribbon] Error:', err.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
