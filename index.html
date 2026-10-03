@@ -131,7 +131,7 @@
     `;
   }
 
-  // Continuously auto-scrolls a row left-to-right (most recent -> oldest)
+  // Continuously auto-scrolls a row left-to-right (oldest -> most recent)
   // by animating a CSS transform (translateX) on the inner .ribbon-track,
   // rather than the row's scrollLeft. transform runs on the compositor
   // thread and doesn't force a synchronous layout/paint every frame the
@@ -228,10 +228,11 @@
     track._autoScrollRafId = requestAnimationFrame(step);
   }
 
-  // Renders one gender's row, most recent game first through oldest last -
-  // the API returns oldest-first, so reverse it here. The card set is
-  // duplicated back-to-back so the auto-scroll loop (see startAutoScroll)
-  // has a second identical copy to snap back to, making the loop seamless.
+  // Renders one gender's row, oldest game first through most recent last -
+  // the API already returns oldest-first, so no reordering needed. The
+  // card set is duplicated back-to-back so the auto-scroll loop (see
+  // startAutoScroll) has a second identical copy to snap back to, making
+  // the loop seamless.
   function renderRow(track, games) {
     const row = track.parentElement;
     if (!games.length) {
@@ -240,7 +241,11 @@
       track.dataset.loopWidth = '0';
       return;
     }
-    const cardsHtml = games.slice().reverse().map(gameCardHtml).join('');
+    // Games arrive oldest-first (ascending start_time) from the API - kept
+    // in that order so oldest sits on the left and newest on the right,
+    // with the auto-scroll (below) continuously revealing newer results
+    // from the right as it moves, same as before but mirrored.
+    const cardsHtml = games.map(gameCardHtml).join('');
     track.innerHTML = cardsHtml + cardsHtml;
     track.style.transform = 'translateX(0)';
 
