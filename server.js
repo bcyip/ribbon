@@ -1,5 +1,5 @@
-// USCCS Match Ribbon — standalone page showing the last 7 days' completed
-// results, split into a Men's row and a Women's row. Each row is a single
+// USCCS Match Ribbon — standalone page showing the last 3 days' results plus the next 3 days' scheduled games,
+// split into a Men's row and a Women's row. Each row is a single
 // horizontally-scrollable strip, oldest on the left and most recent on the
 // right - the page loads scrolled to the right edge of each row, so the
 // most recent results are what's visible first, and scrolling left reveals
@@ -41,7 +41,12 @@ const HTML_FILE = path.join(__dirname, 'index.html');
 // How many days back the ribbon displays. Independent of however far back
 // the admin console's sync happens to reach - this only controls the
 // display window read from whatever's already cached.
-const DISPLAY_DAYS_BACK = 6; // + today = 7 days total
+const DISPLAY_DAYS_BACK = 3;    // results from the last 3 days (+ today)
+const DISPLAY_DAYS_FORWARD = 3; // upcoming SCHEDULED games for the next 3 days
+// Upcoming rows only count if the admin console's sync touched them recently:
+// a game that was later rescheduled outside the synced window would otherwise
+// linger in the cache with its old date and show as a phantom upcoming game.
+const UPCOMING_MAX_STALENESS_HOURS = 3;
 
 // ---------- Postgres ----------
 
@@ -148,6 +153,13 @@ function getEndOfTodayEastern(now) {
   return getEasternDayBounds(year, month, day).end;
 }
 
+function daysAheadEasternEnd(now, daysAhead) {
+  const { year, month, day } = getEasternDateParts(now);
+  const probe = new Date(Date.UTC(year, month - 1, day, 12, 0, 0) + daysAhead * 24 * 60 * 60 * 1000);
+  const p = getEasternDateParts(probe);
+  return getEasternDayBounds(p.year, p.month, p.day).end;
+}
+
 function daysAgoEasternStart(now, daysBack) {
   const { year, month, day } = getEasternDateParts(now);
   const todayUtcNoon = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
@@ -161,19 +173,25 @@ function daysAgoEasternStart(now, daysBack) {
 async function getRibbonPayload() {
   const now = new Date();
   const windowStart = daysAgoEasternStart(now, DISPLAY_DAYS_BACK);
-  const windowEnd = getEndOfTodayEastern(now);
+  const windowEnd = daysAheadEasternEnd(now, DISPLAY_DAYS_FORWARD);
+  const freshAfter = new Date(now.getTime() - UPCOMING_MAX_STALENESS_HOURS * 60 * 60 * 1000);
 
-  // Only games that actually have a score from SportsEngine are shown -
-  // this is a ribbon of RESULTS, so an upcoming/not-yet-played game (even
-  // one SportsEngine has as SCHEDULED) is excluded, along with anything
-  // CANCELED, POSTPONED, FORFEITED, or otherwise never scored.
+  // Two kinds of games share the ribbon, oldest on the left to newest on the
+  // right:
+  //  - games that have already started: shown only if SportsEngine has a
+  //    score for them (so CANCELED / POSTPONED / never-scored games stay out);
+  //  - games still to come: shown only if their status is SCHEDULED (compared
+  //    case-insensitively) and the row was refreshed by a recent sync.
   const result = await pool.query(
     `SELECT game_id, start_time, division_id, gender, home_team, away_team, game_status, se_home_score, se_away_score, home_team_logo_url, away_team_logo_url
      FROM schedule_games_cache
      WHERE start_time >= $1 AND start_time <= $2
-       AND se_home_score IS NOT NULL AND se_away_score IS NOT NULL
+       AND (
+         (start_time <= $3 AND se_home_score IS NOT NULL AND se_away_score IS NOT NULL)
+         OR (start_time > $3 AND UPPER(game_status) = 'SCHEDULED' AND synced_at >= $4)
+       )
      ORDER BY start_time ASC`,
-    [windowStart, windowEnd]
+    [windowStart, windowEnd, now, freshAfter]
   );
 
   const games = result.rows.map((r) => ({
@@ -185,6 +203,7 @@ async function getRibbonPayload() {
     awayTeam: r.away_team,
     gameStatus: r.game_status,
     isCompleted: r.game_status === 'COMPLETED',
+    isUpcoming: new Date(r.start_time) > now,
     homeScore: r.se_home_score,
     awayScore: r.se_away_score,
     homeTeamLogoUrl: r.home_team_logo_url,
