@@ -211,8 +211,6 @@ async function getRibbonPayload() {
     awayTeam: r.away_team,
     gameStatus: r.game_status,
     isCompleted: r.game_status === 'COMPLETED',
-    // a SCHEDULED game with no score yet (today's not-yet-finished games, and the next few days)
-    isUpcoming: String(r.game_status || '').toUpperCase() === 'SCHEDULED' && (r.se_home_score == null || r.se_away_score == null),
     homeScore: r.se_home_score,
     awayScore: r.se_away_score,
     homeTeamLogoUrl: r.home_team_logo_url,

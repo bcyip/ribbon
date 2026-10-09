@@ -44,7 +44,6 @@
   .ribbon-track img { -webkit-user-drag: none; user-drag: none; pointer-events: none; }
 
   .game-card { flex: 0 0 auto; width: 190px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px; font-size: 15px; }
-  .game-card.upcoming { border-style: dashed; background: #fff; }
   .game-card .team-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .game-card .team-logo { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 4px; object-fit: contain; background: #fff; border: 1px solid var(--border); }
   .game-card .team-name { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: #1a1a1a; }
@@ -116,7 +115,7 @@
       : '';
 
     return `
-      <div class="game-card${g.isUpcoming ? ' upcoming' : ''}" title="${home} vs ${away}">
+      <div class="game-card" title="${home} vs ${away}">
         <div class="team-row ${homeWins ? 'winner' : ''}">
           ${homeLogo}
           <span class="team-name">${home}</span>
@@ -127,7 +126,7 @@
           <span class="team-name">${away}</span>
           <span class="team-score">${hasScore ? g.awayScore : '—'}</span>
         </div>
-        <div class="game-time">${g.isUpcoming ? 'Scheduled · ' : ''}${formatGameTime(g.startTime)}</div>
+        <div class="game-time">${formatGameTime(g.startTime)}</div>
       </div>
     `;
   }
