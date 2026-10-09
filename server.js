@@ -176,22 +176,30 @@ async function getRibbonPayload() {
   const windowEnd = daysAheadEasternEnd(now, DISPLAY_DAYS_FORWARD);
   const freshAfter = new Date(now.getTime() - UPCOMING_MAX_STALENESS_HOURS * 60 * 60 * 1000);
 
-  // Two kinds of games share the ribbon, oldest on the left to newest on the
-  // right:
-  //  - games that have already started: shown only if SportsEngine has a
-  //    score for them (so CANCELED / POSTPONED / never-scored games stay out);
-  //  - games still to come: shown only if their status is SCHEDULED (compared
-  //    case-insensitively) and the row was refreshed by a recent sync.
+  const todayStart = daysAgoEasternStart(now, 0);
+  const todayEnd = getEndOfTodayEastern(now);
+
+  // Oldest on the left to newest on the right. What qualifies depends on the day:
+  //  - before today: only games SportsEngine has a score for (so CANCELED /
+  //    POSTPONED / never-scored games stay out);
+  //  - today: games marked SCHEDULED or COMPLETED, whether or not they have
+  //    kicked off yet or have a score;
+  //  - after today: only games marked SCHEDULED.
+  // Status is compared case-insensitively, and SCHEDULED rows must have been
+  // refreshed by a recent sync so a game rescheduled outside the synced window
+  // doesn't linger under its old date.
   const result = await pool.query(
     `SELECT game_id, start_time, division_id, gender, home_team, away_team, game_status, se_home_score, se_away_score, home_team_logo_url, away_team_logo_url
      FROM schedule_games_cache
      WHERE start_time >= $1 AND start_time <= $2
        AND (
-         (start_time <= $3 AND se_home_score IS NOT NULL AND se_away_score IS NOT NULL)
-         OR (start_time > $3 AND UPPER(game_status) = 'SCHEDULED' AND synced_at >= $4)
+         (start_time < $4 AND se_home_score IS NOT NULL AND se_away_score IS NOT NULL)
+         OR (start_time >= $4 AND start_time <= $5
+             AND (UPPER(game_status) = 'COMPLETED' OR (UPPER(game_status) = 'SCHEDULED' AND synced_at >= $3)))
+         OR (start_time > $5 AND UPPER(game_status) = 'SCHEDULED' AND synced_at >= $3)
        )
      ORDER BY start_time ASC`,
-    [windowStart, windowEnd, now, freshAfter]
+    [windowStart, windowEnd, freshAfter, todayStart, todayEnd]
   );
 
   const games = result.rows.map((r) => ({
@@ -203,7 +211,8 @@ async function getRibbonPayload() {
     awayTeam: r.away_team,
     gameStatus: r.game_status,
     isCompleted: r.game_status === 'COMPLETED',
-    isUpcoming: new Date(r.start_time) > now,
+    // a SCHEDULED game with no score yet (today's not-yet-finished games, and the next few days)
+    isUpcoming: String(r.game_status || '').toUpperCase() === 'SCHEDULED' && (r.se_home_score == null || r.se_away_score == null),
     homeScore: r.se_home_score,
     awayScore: r.se_away_score,
     homeTeamLogoUrl: r.home_team_logo_url,
